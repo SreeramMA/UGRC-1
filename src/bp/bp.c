@@ -1,3 +1,4 @@
+#include "bp/runahead_ext.h"
 /* Copyright 2020 HPS/SAFARI Research Groups
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -315,6 +316,8 @@ void bp_stat_main_branch_resolve_latency(Op* op, Counter resolve_cycle, Flag rec
 /* init_bp:  initializes all branch prediction structures */
 
 void init_bp_data(uns8 proc_id, uns8 bp_id, Bp_Data* bp_data, Bp_Data* primary_bp_data) {
+
+  if (proc_id == 0) runahead_ext_init();
   uns ii;
   if (SPEC_LEVEL)
     ASSERTM(proc_id, BP_MECH == TAGE64K_BP || BP_MECH == BIMODAL_BP,

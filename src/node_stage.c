@@ -1,3 +1,4 @@
+#include "bp/runahead_ext.h"
 /* Copyright 2020 HPS/SAFARI Research Groups
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -560,6 +561,9 @@ void node_retire() {
 
     Op* next_retired = op->next_node;
     Flag macro_fused_saved = op->macro_fused;
+
+    runahead_ext_update_hbt(op);
+    runahead_ext_update_ceb(op);
 
     if (model->op_retired_hook)
       model->op_retired_hook(op);

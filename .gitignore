@@ -68,3 +68,4 @@ test_string_pinball/
 .vscode/*
 *.code-workspace
 .env
+src/build_local/

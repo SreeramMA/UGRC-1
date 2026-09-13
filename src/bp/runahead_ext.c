@@ -131,6 +131,11 @@ void runahead_ext_extract_chain(Op* branch_op) {
 
     CEB_Entry* entry = &ceb[current_idx];
 
+    // Stop if we reach the branch itself
+    if (entry->pc == branch_op->inst->addr) {
+      break; 
+    }
+
     // Check if this instruction produces any Live-In
     Flag is_producer = FALSE;
     uns16 produced_reg_id = 0;

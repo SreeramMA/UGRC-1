@@ -1,4 +1,0 @@
-/home/sreeram/Downloads/scarab/src/build_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/foo.dir
-/home/sreeram/Downloads/scarab/src/build_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/boo.dir
-/home/sreeram/Downloads/scarab/src/build_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/edit_cache.dir
-/home/sreeram/Downloads/scarab/src/build_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/rebuild_cache.dir

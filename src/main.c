@@ -217,6 +217,7 @@ Scarab's source code is organized as follows:
 #include "sim.h"
 #include "statistics.h"
 #include "version.h"
+#include "bp/runahead_ext.h"
 
 /**************************************************************************************/
 
@@ -286,6 +287,8 @@ int main(int argc, char* argv[], char* envp[]) {
   time(&cur_time);
   fprintf(mystdout, "Scarab finished at %s\n", ctime(&cur_time));
   WRITE_STATUS("FINISHED");
+
+  runahead_ext_dump_chain_lengths();
 
   close_output_streams();
 

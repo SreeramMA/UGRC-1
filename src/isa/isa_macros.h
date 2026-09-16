@@ -42,11 +42,13 @@
 #define NUM_FP_REGS 8
 #define NUM_FP_CTRL_REGS 2
 #define NUM_TEMP_REGS 16
+#define NUM_LRF_REGS 8
 #define NUM_OTHER_REGS 1
 
 #define NUM_REG_IDS                                                                                     \
   (NUM_INVALID_REGS + NUM_GENERAL_PURPOSE_REGS + NUM_SEGMENT_REGS + NUM_INST_PTR_REGS + NUM_FLAG_REGS + \
-   NUM_VECTOR_REGS + NUM_MASK_REGS + NUM_FP_REGS + NUM_FP_CTRL_REGS + NUM_TEMP_REGS + NUM_OTHER_REGS)
+   NUM_VECTOR_REGS + NUM_MASK_REGS + NUM_FP_REGS + NUM_FP_CTRL_REGS + NUM_TEMP_REGS + NUM_LRF_REGS +   \
+   NUM_OTHER_REGS)
 
 #define IS_CALLSYS(tab) ((tab)->cf_type == CF_SYS)
 #define IS_NOP(tab) ((tab)->op_type == OP_NOP)

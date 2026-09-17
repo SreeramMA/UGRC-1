@@ -1,6 +1,12 @@
 #include "bp/runahead_ext.h"
 #include "isa/isa.h"
 #include "globals/assert.h"
+#include "globals/global_vars.h"
+#include "memory/memory.h"
+#include "memory/memory.param.h"
+#include "dcache_stage.h"
+#include "op_pool.h"
+#include "model.h"
 
 static Hash_Table hbt;
 static uns retired_branch_count = 0;
@@ -78,6 +84,8 @@ void runahead_ext_update_ceb(Op* op) {
 
   // 1. Copy basic info
   entry->pc = op->inst->addr;
+  entry->inst = op->inst;
+  entry->uop = op->uop;
   entry->cf_type = op->uop->cf_type;
   entry->op_type = op->uop->op_type;
   entry->branch_dir = op->oracle_info.dir;
@@ -109,6 +117,8 @@ void runahead_ext_update_ceb(Op* op) {
 
 typedef struct {
   Addr pc;
+  Static_Inst_Info* inst;
+  Static_Op_Info* uop;
   uns num_src_regs;
   uns num_dest_regs;
   uns16 srcs[MAX_SRCS];
@@ -116,6 +126,37 @@ typedef struct {
   Flag is_load;
   Addr mem_addr;
 } Extracted_Producer;
+
+// Manage LRF Physical Registers (REG_LRF0 .. REG_LRF7)
+typedef struct {
+  Flag in_use[LRF_SIZE];
+  uns16 arch_to_lrf[NUM_REGS];
+} LRF_Rename_State;
+
+static void lrf_init(LRF_Rename_State* state) {
+  for (uns i = 0; i < LRF_SIZE; i++) {
+    state->in_use[i] = FALSE;
+  }
+  for (uns i = 0; i < NUM_REGS; i++) {
+    state->arch_to_lrf[i] = 0;
+  }
+}
+
+static uns16 lrf_alloc_reg(LRF_Rename_State* state) {
+  for (uns i = 0; i < LRF_SIZE; i++) {
+    if (!state->in_use[i]) {
+      state->in_use[i] = TRUE;
+      return REG_LRF0 + i;
+    }
+  }
+  return REG_LRF0;
+}
+
+static void lrf_free_reg(LRF_Rename_State* state, uns16 lrf_reg) {
+  if (lrf_reg >= REG_LRF0 && lrf_reg < REG_LRF0 + LRF_SIZE) {
+    state->in_use[lrf_reg - REG_LRF0] = FALSE;
+  }
+}
 
 void runahead_ext_extract_chain(Op* branch_op) {
   if (!branch_op || !branch_op->uop) return;
@@ -185,6 +226,8 @@ void runahead_ext_extract_chain(Op* branch_op) {
 
       // Add to buffer
       chain_buffer[chain_length].pc = entry->pc;
+      chain_buffer[chain_length].inst = entry->inst;
+      chain_buffer[chain_length].uop = entry->uop;
       chain_buffer[chain_length].num_src_regs = entry->num_src_regs;
       chain_buffer[chain_length].num_dest_regs = entry->num_dest_regs;
       for (uns i = 0; i < entry->num_src_regs; i++) {
@@ -273,15 +316,72 @@ void runahead_ext_extract_chain(Op* branch_op) {
     s->count++;
   }
 
-  // Convert Extracted_Producer array to an array of PCs in execution order
+  // Convert Extracted_Producer array to an array of PCs and DCC_Uops in execution order with Local Renaming
   Addr extracted_pcs[MAX_CHAIN_LENGTH];
+  DCC_Uop extracted_uops[MAX_CHAIN_LENGTH];
+
+  LRF_Rename_State lrf_state;
+  lrf_init(&lrf_state);
+
   for (uns i = 0; i < chain_length; i++) {
     // The chain was extracted backwards, so we reverse it to store it in execution order
-    extracted_pcs[i] = chain_buffer[chain_length - 1 - i].pc;
+    uns rev_idx = chain_length - 1 - i;
+    Extracted_Producer* p = &chain_buffer[rev_idx];
+    DCC_Uop* u = &extracted_uops[i];
+
+    extracted_pcs[i] = p->pc;
+    u->pc = p->pc;
+    u->inst = p->inst;
+    u->mem_type = p->is_load ? MEM_LD : NOT_MEM;
+    u->mem_addr = p->mem_addr;
+
+    // Private copy of Static_Op_Info so we never mutate shared static tables
+    if (p->uop) {
+      u->uop = *(p->uop);
+    } else {
+      memset(&u->uop, 0, sizeof(Static_Op_Info));
+      u->uop.mem_type = u->mem_type;
+      u->uop.num_src_regs = p->num_src_regs;
+      u->uop.num_dest_regs = p->num_dest_regs;
+    }
+
+    // 1. Rename sources:
+    // If the source was produced by an earlier uop in the chain, use its LRF register.
+    // Otherwise, it is a Live-In from the main thread; preserve its original architectural register ID.
+    for (uns j = 0; j < p->num_src_regs; j++) {
+      uns16 arch_id = p->srcs[j];
+      if (arch_id < NUM_REGS && lrf_state.arch_to_lrf[arch_id] != 0) {
+        u->uop.srcs[j].id = lrf_state.arch_to_lrf[arch_id];
+      } else {
+        u->uop.srcs[j].id = arch_id;
+      }
+    }
+
+    // 2. Rename destinations:
+    // Every produced register within the slice is assigned an LRF register (REG_LRF0..REG_LRF7)
+    for (uns j = 0; j < p->num_dest_regs; j++) {
+      uns16 arch_id = p->dests[j];
+      if (arch_id > 0 && arch_id < NUM_REGS) {
+        uns16 lrf_reg = lrf_alloc_reg(&lrf_state);
+        lrf_state.arch_to_lrf[arch_id] = lrf_reg;
+        u->uop.dests[j].id = lrf_reg;
+      }
+    }
+
+    // 3. Dynamic Register Reuse: Free sources that reach their last use at instruction i
+    for (uns j = 0; j < p->num_src_regs; j++) {
+      uns16 arch_id = p->srcs[j];
+      if (arch_id < NUM_REGS && last_use[arch_id] == (int)i) {
+        if (lrf_state.arch_to_lrf[arch_id] != 0) {
+          lrf_free_reg(&lrf_state, lrf_state.arch_to_lrf[arch_id]);
+          lrf_state.arch_to_lrf[arch_id] = 0;
+        }
+      }
+    }
   }
 
   // Tag with terminating branch's PC and outcome and install into DCC with target branch PC
-  runahead_ext_dcc_insert(terminating_pc, terminating_outcome, branch_op->inst->addr, chain_length, extracted_pcs, live_ins);
+  runahead_ext_dcc_insert(terminating_pc, terminating_outcome, branch_op->inst->addr, chain_length, extracted_pcs, extracted_uops, live_ins);
   printf("\n[RUNAHEAD] Successfully Installed Chain into DCC for Terminating Branch PC: 0x%llx (Outcome: %u, Target: 0x%llx, Length: %u)\n", 
          (unsigned long long)terminating_pc, terminating_outcome, (unsigned long long)branch_op->inst->addr, chain_length);
 }
@@ -297,7 +397,7 @@ void runahead_ext_dcc_init(void) {
   }
 }
 
-void runahead_ext_dcc_insert(Addr branch_pc, Flag branch_outcome, Addr target_branch_pc, uns chain_length, Addr* chain_pcs, Flag* live_ins) {
+void runahead_ext_dcc_insert(Addr branch_pc, Flag branch_outcome, Addr target_branch_pc, uns chain_length, Addr* chain_pcs, DCC_Uop* uops, Flag* live_ins) {
   dcc_global_counter++;
   
   // Try to find an empty slot or replace the LRU entry
@@ -330,6 +430,7 @@ void runahead_ext_dcc_insert(Addr branch_pc, Flag branch_outcome, Addr target_br
   dcc[lru_idx].last_used = dcc_global_counter;
   
   memcpy(dcc[lru_idx].chain_pcs, chain_pcs, sizeof(Addr) * chain_length);
+  memcpy(dcc[lru_idx].uops, uops, sizeof(DCC_Uop) * chain_length);
   memcpy(dcc[lru_idx].live_ins, live_ins, sizeof(Flag) * NUM_REGS);
 }
 
@@ -342,6 +443,27 @@ DCC_Entry* runahead_ext_dcc_lookup(Addr branch_pc, Flag branch_outcome) {
     }
   }
   return NULL;
+}
+
+// --- Chain Injection & Runahead Control ---
+Flag runahead_active = FALSE;
+Addr runahead_target_pc = 0;
+
+void runahead_ext_inject_chain(DCC_Entry* entry) {
+  if (!entry || !entry->valid) return;
+
+  printf("[RUNAHEAD] Injecting Chain for Target Branch 0x%llx (Length: %u)\n",
+         (unsigned long long)entry->target_branch_pc, entry->chain_length);
+
+  for (uns i = 0; i < entry->chain_length; i++) {
+    DCC_Uop* duop = &entry->uops[i];
+    if (duop->mem_type == MEM_LD && duop->mem_addr != 0) {
+      if (model && model->mem == MODEL_MEM) {
+        new_mem_req(MRT_DPRF, 0, duop->mem_addr, DCACHE_LINE_SIZE, 1, NULL,
+                    dcache_fill_line, unique_count, 0);
+      }
+    }
+  }
 }
 
 void runahead_ext_dump_chain_lengths(void) {

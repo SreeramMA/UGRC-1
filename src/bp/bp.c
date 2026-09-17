@@ -530,9 +530,23 @@ static Addr bp_predict_op_impl(Bp_Data* bp_data, Op* op, uns bp_id, uns br_num, 
       // Branch predictors may use pred_global_hist as input.
       bp_pred_info->pred_global_hist = bp_data->global_hist;
 
-      if (PERFECT_BP) {
+      if (PERFECT_BP || (runahead_active && op->inst->addr == runahead_target_pc)) {
         bp_pred_info->pred = op->oracle_info.dir;
         bp_pred_info->pred_orig = op->oracle_info.dir;
+
+        if (runahead_active && op->inst->addr == runahead_target_pc && pred_level == BP_PRED_MAIN) {
+          printf("\n[RUNAHEAD] Guiding Target Branch 0x%llx with Perfect Prediction (Dir: %u)\n",
+                 (unsigned long long)op->inst->addr, op->oracle_info.dir);
+          DCC_Entry* next_entry = runahead_ext_dcc_lookup(op->inst->addr, op->oracle_info.dir);
+          if (next_entry) {
+            runahead_target_pc = next_entry->target_branch_pc;
+            runahead_ext_inject_chain(next_entry);
+          } else {
+            runahead_active = FALSE;
+            printf("[RUNAHEAD] DCC Miss on (0x%llx, %u) - Terminating Runahead\n",
+                   (unsigned long long)op->inst->addr, op->oracle_info.dir);
+          }
+        }
       } else {
         ASSERT(op->proc_id, !PERFECT_NT_BTB);  // currently not supported
         bp_pred_info->pred = pred_bp->pred_func(op, pred_level);

@@ -568,8 +568,10 @@ void node_retire() {
     if (model->op_retired_hook)
       model->op_retired_hook(op);
     else {
-      printf("[ft_free_op] stage=node_stage:retire op_num=%llu op=%p\n", (unsigned long long)op->op_num, (void*)op);
-      ft_free_op(op);
+      if (op->parent_FT)
+        ft_free_op(op);
+      else
+        free_op(op);
     }
     // the fused op does not occupy the ROB entry
     if (!macro_fused_saved)

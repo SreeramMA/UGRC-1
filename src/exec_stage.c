@@ -47,6 +47,7 @@
 #include "memory/memory.param.h"
 
 #include "bp/bp.h"
+#include "bp/runahead_ext.h"
 #include "dvfs/perf_pred.h"
 
 #include "cmp_model.h"
@@ -626,8 +627,21 @@ static inline void exec_stage_bp_resolve(Op* op) {
           (unsigned long long)op_get_exec_cycle(op));
     bp_stat_main_branch_resolve_latency(op, op_get_exec_cycle(op), TRUE);
     bp_sched_recovery(bp_recovery_info, op, op_get_exec_cycle(op));
-    if (!op->off_path)
+    if (!op->off_path) {
       op->recovery_scheduled = TRUE;
+
+      // Check if this mispredicting branch triggers a runahead chain in the DCC
+      DCC_Entry* entry = runahead_ext_dcc_lookup(op->inst->addr, op->oracle_info.dir);
+      if (entry) {
+        runahead_active = TRUE;
+        runahead_target_pc = entry->target_branch_pc;
+        runahead_ext_inject_chain(entry);
+        printf("\n[RUNAHEAD] Recovery Hit in DCC! Activated Runahead for Target Branch PC: 0x%llx\n",
+               (unsigned long long)runahead_target_pc);
+      } else {
+        runahead_active = FALSE;
+      }
+    }
 
     // stats for the reason of resteer
     STAT_EVENT(op->proc_id, RESTEER_RECOVER_AT_EXEC_NOT_CF + op->uop->cf_type);

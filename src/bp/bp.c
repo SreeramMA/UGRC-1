@@ -1,4 +1,3 @@
-#include "bp/runahead_ext.h"
 /* Copyright 2020 HPS/SAFARI Research Groups
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -28,6 +27,7 @@
  ***************************************************************************************/
 
 #include "bp/bp.h"
+#include "bp/runahead_ext.h"
 
 #include "globals/assert.h"
 #include "globals/global_defs.h"
@@ -104,6 +104,10 @@ Bp_Recovery_Info* bp_recovery_info = NULL;
 Bp_Data* g_bp_data = NULL;
 extern List op_buf;
 extern uns operating_mode;
+
+/* Branches predicted perfectly: the H2P branch list of this simpoint, see --h2p_perfect_dir */
+static Hash_Table h2p_perfect_table;
+static Flag h2p_perfect_enabled = FALSE;
 
 static Hash_Table branch_pc_stats_table;
 static Flag branch_pc_stats_inited = FALSE;
@@ -312,12 +316,60 @@ void bp_stat_main_branch_resolve_latency(Op* op, Counter resolve_cycle, Flag rec
              (recover_at_exec ? MAIN_BRANCH_RESOLVE_AT_EXEC_LAT_1 : MAIN_BRANCH_RESOLVE_AT_DECODE_LAT_1) + bucket);
 }
 
+/* Reads <dir>/<workload>/<simpoint>.txt (one hex branch IP per line) into `table`; workload and simpoint come from the
+ * trace path (.../<workload>/traces/simp/<simpoint>.zip). A missing file is an error, so that a misconfigured run
+ * cannot silently run without the list. */
+uns bp_load_pc_list(const char* dir, Hash_Table* table, const char* what) {
+  ASSERTM(0, CBP_TRACE_R0, "%s needs --cbp_trace_r0 to identify the simpoint\n", what);
+  char trace[1024];
+  snprintf(trace, sizeof(trace), "%s", CBP_TRACE_R0);
+  char* tail = strstr(trace, "/traces/");
+  ASSERTM(0, tail, "cannot find the workload in trace path %s\n", CBP_TRACE_R0);
+  *tail = '\0';
+  const char* workload = strrchr(trace, '/') ? strrchr(trace, '/') + 1 : trace;
+  const char* simpoint = strrchr(CBP_TRACE_R0, '/') + 1;
+  const char* dot = strchr(simpoint, '.');
+  char path[1536];
+  snprintf(path, sizeof(path), "%s/%s/%.*s.txt", dir, workload, (int)(dot ? dot - simpoint : strlen(simpoint)),
+           simpoint);
+  FILE* fp = fopen(path, "r");
+  ASSERTM(0, fp, "cannot open %s %s\n", what, path);
+  unsigned long long pc;
+  uns n = 0;
+  while (fscanf(fp, "%llx", &pc) == 1) {
+    Flag is_new;
+    Addr* a = (Addr*)hash_table_access_create(table, (Addr)pc, &is_new);
+    *a = (Addr)pc;
+    n++;
+  }
+  fclose(fp);
+  printf("%s: %u branches listed in %s\n", what, n, path);
+  return n;
+}
+
+static void init_h2p_perfect(void) {
+  if (!H2P_PERFECT_DIR || !H2P_PERFECT_DIR[0])
+    return;
+  init_hash_table(&h2p_perfect_table, "H2P Perfect Table", 1024, sizeof(Addr));
+  bp_load_pc_list(H2P_PERFECT_DIR, &h2p_perfect_table, "H2P perfect-prediction list");
+  h2p_perfect_enabled = TRUE;
+}
+
+static void force_correct_prediction(Op* op, Bp_Pred_Info* bp_pred_info, uns pred_level, Stat_Enum stat) {
+  bp_pred_info->pred = op->oracle_info.dir;
+  bp_pred_info->pred_orig = op->oracle_info.dir;
+  if (pred_level == BP_PRED_MAIN)
+    STAT_EVENT(op->proc_id, stat);
+}
+
 /******************************************************************************/
 /* init_bp:  initializes all branch prediction structures */
 
 void init_bp_data(uns8 proc_id, uns8 bp_id, Bp_Data* bp_data, Bp_Data* primary_bp_data) {
-
-  if (proc_id == 0) runahead_ext_init();
+  if (proc_id == 0) {
+    runahead_ext_init();
+    init_h2p_perfect();
+  }
   uns ii;
   if (SPEC_LEVEL)
     ASSERTM(proc_id, BP_MECH == TAGE64K_BP || BP_MECH == BIMODAL_BP,
@@ -530,27 +582,21 @@ static Addr bp_predict_op_impl(Bp_Data* bp_data, Op* op, uns bp_id, uns br_num, 
       // Branch predictors may use pred_global_hist as input.
       bp_pred_info->pred_global_hist = bp_data->global_hist;
 
-      if (PERFECT_BP || (runahead_active && op->inst->addr == runahead_target_pc)) {
+      if (PERFECT_BP) {
         bp_pred_info->pred = op->oracle_info.dir;
         bp_pred_info->pred_orig = op->oracle_info.dir;
-
-        if (runahead_active && op->inst->addr == runahead_target_pc && pred_level == BP_PRED_MAIN) {
-          printf("\n[RUNAHEAD] Guiding Target Branch 0x%llx with Perfect Prediction (Dir: %u)\n",
-                 (unsigned long long)op->inst->addr, op->oracle_info.dir);
-          DCC_Entry* next_entry = runahead_ext_dcc_lookup(op->inst->addr, op->oracle_info.dir);
-          if (next_entry) {
-            runahead_target_pc = next_entry->target_branch_pc;
-            runahead_ext_inject_chain(next_entry);
-          } else {
-            runahead_active = FALSE;
-            printf("[RUNAHEAD] DCC Miss on (0x%llx, %u) - Terminating Runahead\n",
-                   (unsigned long long)op->inst->addr, op->oracle_info.dir);
-          }
-        }
       } else {
         ASSERT(op->proc_id, !PERFECT_NT_BTB);  // currently not supported
         bp_pred_info->pred = pred_bp->pred_func(op, pred_level);
         bp_pred_info->pred_orig = bp_pred_info->pred;
+        if (pred_level == BP_PRED_MAIN && op->uop->cf_type == CF_CBR)
+          runahead_ext_note_prediction(op, bp_pred_info->pred);
+        // The predictor ran above, so its state and training stay as without these options; only the final
+        // prediction is replaced by the correct direction.
+        if (h2p_perfect_enabled && hash_table_access(&h2p_perfect_table, op->inst->addr))
+          force_correct_prediction(op, bp_pred_info, pred_level, H2P_PERFECT_PREDICTIONS);
+        if (op->runahead_oracle)  // runahead candidate whose backslice fits (see bp/runahead_ext.h)
+          force_correct_prediction(op, bp_pred_info, pred_level, RUNAHEAD_ORACLE_PREDICTIONS);
       }
       // Update history used by the rest of Scarab.
       if (pred_level == BP_PRED_MAIN)

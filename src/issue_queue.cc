@@ -740,7 +740,7 @@ void IssueQueue::issued(uns16 entry_id) {
 void IssueQueue::recover() {
   for (IssueQueueEntry& entry : entries) {
     Op* op = entry.op;
-    if (op == nullptr || !op->off_path) {
+    if (op == nullptr || !(op->off_path || op->runahead_shadow)) {
       continue;
     }
 

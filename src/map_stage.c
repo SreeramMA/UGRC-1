@@ -45,6 +45,7 @@
 #include "memory/memory.param.h"
 
 #include "bp/bp.h"
+#include "bp/runahead_ext.h"
 
 #include "ft.h"
 #include "map.h"
@@ -146,10 +147,16 @@ void recover_map_stage() {
         if (FLUSH_OP(cur->ops[jj])) {
           DEBUG(map->proc_id, "Map flushing op_num:%llu off_path:%u\n", (unsigned long long)cur->ops[jj]->op_num,
                 cur->ops[jj]->off_path);
-          flushed = TRUE;
-          ASSERT(map->proc_id, cur->ops[jj]->off_path);
-          if (cur->ops[jj]->parent_FT)
-            ft_free_op(cur->ops[jj]);
+          ASSERT(map->proc_id, cur->ops[jj]->off_path || cur->ops[jj]->runahead_shadow);
+          if (cur->ops[jj]->runahead_shadow) {
+            // not part of the instruction stream: it must not trigger the FT-consistency check below
+            STAT_EVENT(map->proc_id, RUNAHEAD_SHADOW_OPS_FLUSHED);
+            free_op(cur->ops[jj]);
+          } else {
+            flushed = TRUE;
+            if (cur->ops[jj]->parent_FT)
+              ft_free_op(cur->ops[jj]);
+          }
           cur->ops[jj] = NULL;
         } else {
           Op* op = cur->ops[jj];
@@ -254,6 +261,10 @@ static inline void stage_process_op(Op* op) {
   /* add to sequential op list */
   add_to_seq_op_list(td, op);
   ASSERT(map->proc_id, td->seq_op_list.count <= op_pool_active_ops);
+
+  /* runahead twins of this uop are mapped first, so they read the state the real uop is about to read */
+  if (op->runahead_twins)
+    runahead_ext_map_twins(op);
 
   /* map the op based on true dependencies & set information in op->oracle_info */
   thread_map_op(op);

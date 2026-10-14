@@ -288,7 +288,7 @@ int main(int argc, char* argv[], char* envp[]) {
   fprintf(mystdout, "Scarab finished at %s\n", ctime(&cur_time));
   WRITE_STATUS("FINISHED");
 
-  runahead_ext_dump_chain_lengths();
+  runahead_ext_dump();
 
   close_output_streams();
 

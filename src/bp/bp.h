@@ -308,6 +308,9 @@ Flag is_h2p(Addr pc);
 Flag is_h2p_at_fe(Addr pc);
 Flag is_h2p_at_decode(Addr pc);
 Flag is_h2p_at_exec(Addr pc);
+
+// Loads a per-simpoint list of branch IPs <dir>/<workload>/<simpoint>.txt into `table` (see bp.c)
+uns bp_load_pc_list(const char* dir, Hash_Table* table, const char* what);
 void reset_h2p_stats(void);
 
 /**************************************************************************************/

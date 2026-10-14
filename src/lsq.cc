@@ -75,6 +75,7 @@ class LSQ {
   size_t entry_num = 0;
 
   std::deque<LSQ_Entry> entries;
+  size_t shadow_held = 0;  // runahead twins holding a slot
 
  public:
   void init(uns8 proc_id, Mem_Type mem_type, size_t entry_num);
@@ -82,6 +83,8 @@ class LSQ {
   void free(Op* mem_op);
   bool available();
   void recover(Counter flush_op_num);
+  bool acquire_shadow();
+  void release_shadow();
 
   LSQ(){};
   const std::deque<LSQ_Entry>& get_entries() const { return entries; }
@@ -92,6 +95,7 @@ void LSQ::init(const uns8 proc_id, const Mem_Type mem_type, const size_t entry_n
   this->mem_type = mem_type;
   this->entry_num = entry_num;
   entries.clear();
+  shadow_held = 0;
 }
 
 void LSQ::allocate(Op* mem_op) {
@@ -112,11 +116,23 @@ void LSQ::free(Op* mem_op) {
 
 bool LSQ::available() {
   ASSERT(proc_id, entries.size() <= entry_num);
-  if (entries.size() == entry_num) {
+  if (entries.size() + shadow_held >= entry_num) {
     return false;
   }
 
   return true;
+}
+
+bool LSQ::acquire_shadow() {
+  if (!available())
+    return false;
+  shadow_held++;
+  return true;
+}
+
+void LSQ::release_shadow() {
+  ASSERT(proc_id, shadow_held > 0);
+  shadow_held--;
 }
 
 void LSQ::recover(Counter flush_op_num) {
@@ -154,6 +170,8 @@ class LSQ_Unit {
   void dispatch(Op* mem_op);
   void recover(Counter flush_op_num);
   void commit(Op* mem_op);
+  bool acquire_shadow_load() { return load_queue.acquire_shadow(); }
+  void release_shadow_load() { load_queue.release_shadow(); }
 };
 
 LSQ_Unit::LSQ_Unit(uns8 proc_id) {
@@ -286,6 +304,28 @@ Flag lsq_available(Mem_Type mem_type) {
     return TRUE;
 
   return lsq_unit->available(mem_type);
+}
+
+/*
+  Called by:
+  --- node_stage.c -> before a runahead twin of a load is filled into the ROB
+  Desc:
+  --- reserve a load-queue slot for the twin; returns FALSE if the load queue is full
+*/
+Flag lsq_shadow_acquire(Op* twin) {
+  if (!LSQ_ENABLE)
+    return TRUE;
+  if (!per_core_lsq_unit[twin->proc_id].acquire_shadow_load())
+    return FALSE;
+  twin->runahead_lsq_held = TRUE;
+  return TRUE;
+}
+
+/* Called by free_op() when a twin that holds a slot leaves the machine (retired or flushed) */
+void lsq_shadow_release(Op* twin) {
+  if (!LSQ_ENABLE)
+    return;
+  per_core_lsq_unit[twin->proc_id].release_shadow_load();
 }
 
 /*

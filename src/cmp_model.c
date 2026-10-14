@@ -29,6 +29,7 @@
 /**************************************************************************************/
 
 #include "cmp_model.h"
+#include "bp/runahead_ext.h"
 
 #include "globals/assert.h"
 #include "globals/global_vars.h"
@@ -381,6 +382,7 @@ void cmp_recover() {
 
   topdown_bp_recovery(bp_recovery_info->proc_id, bp_recovery_info->recovery_op);
 
+  runahead_ext_on_recovery(bp_recovery_info->recovery_op_num);
   reg_file_recover(bp_recovery_info->recovery_op);
   recover_thread(td, bp_recovery_info->recovery_fetch_addr, bp_recovery_info->recovery_op_num,
                  bp_recovery_info->recovery_inst_uid, FALSE);

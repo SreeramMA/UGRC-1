@@ -234,6 +234,15 @@ struct Op_struct {
 
   Flag marked;  // for algorithms that mark already seen ops
 
+  // Runahead (see bp/runahead_ext.h). A shadow "twin" occupies ROB/RS/FU/port/dcache/load-queue resources like the
+  // real uop it shadows, but never retires architecturally, never touches the main register file and is flushed on
+  // every recovery that flushes its real uop (it carries that uop's op_num).
+  Flag runahead_shadow;
+  Flag runahead_lsq_held;        // twin: holds a load-queue slot
+  Counter runahead_twin_of;      // twin: unique_num of the real uop it precedes
+  uns8 runahead_twins;           // real uop: number of twins to push just before it
+  Flag runahead_oracle;          // real branch: a candidate instance whose backslice fits
+
   /*------------------------------------------------------------------------------------*/
   // FIELDS BELOW THIS POINT SHOULD BE MOVED INTO OTHER HEADERS
   // (along with any related structs above)

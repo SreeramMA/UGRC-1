@@ -396,3 +396,21 @@ DEF_PARAM(dfe3_stop_policy, DFE3_STOP_POLICY, uns, uns, 1, )
 DEF_PARAM(dfe4_stop_policy, DFE4_STOP_POLICY, uns, uns, 1, )
 
 DEF_PARAM(lookahead_buf_size, LOOKAHEAD_BUF_SIZE, uns, uns, 0, )
+
+/* Runahead model after the H2P-Brain paper (ISPASS 2026), see bp/runahead_ext.h. Needs --lookahead_buf_size. */
+DEF_PARAM(runahead_enable, RUNAHEAD_ENABLE, uns, uns, 0, )
+/* a branch is a candidate if more than runahead_eligible_pct percent of its executions (at least runahead_min_execs
+   so far) have a backward dependence slice of fewer than runahead_backslice_limit uops (at most 64) */
+DEF_PARAM(runahead_backslice_limit, RUNAHEAD_BACKSLICE_LIMIT, uns, uns, 16, )
+DEF_PARAM(runahead_eligible_pct, RUNAHEAD_ELIGIBLE_PCT, uns, uns, 90, )
+DEF_PARAM(runahead_min_execs, RUNAHEAD_MIN_EXECS, uns, uns, 32, )
+/* 1 = only gather the per-branch statistics (executions, slice sizes, mispredictions, uops flushed per recovery) and write
+   them to runahead_branches.csv; nothing is predicted or injected. This is the profiling run of the offline H2P-Brain
+   analysis */
+DEF_PARAM(runahead_profile_only, RUNAHEAD_PROFILE_ONLY, uns, uns, 0, )
+/* Directory with the offline H2P-Brain analysis's exclusion lists, <dir>/<workload>/<simpoint>.txt: the branch IPs
+   that are never guided (ISPASS'26 sec. V-C). Empty = no exclusion */
+DEF_PARAM(runahead_exclude_dir, RUNAHEAD_EXCLUDE_DIR, char*, string, "", )
+/* 1 = no branch is guided (no oracle prediction, no twins) while the warmup phase runs; the per-branch statistics that
+   decide eligibility are still gathered, so guiding starts right away when the measured region begins */
+DEF_PARAM(runahead_off_in_warmup, RUNAHEAD_OFF_IN_WARMUP, uns, uns, 0, )

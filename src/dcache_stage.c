@@ -162,7 +162,7 @@ void recover_dcache_stage() {
     }
     if (op && op->op_num > bp_recovery_info->recovery_op_num) {
       DEBUG(dc->proc_id, "Dcache flushing op_num:%llu off_path:%u\n", (unsigned long long)op->op_num, op->off_path);
-      ASSERT(dc->proc_id, op->off_path);
+      ASSERT(dc->proc_id, op->off_path || op->runahead_shadow);
       dc->sd.ops[ii] = NULL;
       dc->sd.op_count--;
     }
@@ -229,18 +229,30 @@ void update_dcache_stage(Stage_Data* src_sd) {
   /* phase 2 - check the dcache port availability and do dcache access */
   int start_op_count = dc->sd.op_count;
   Counter last_oldest_op_num = 0;
+  Counter last_oldest_unique_num = 0;
   for (uns ii = 0; ii < start_op_count; ii++) {
-    /* update in program order (make things easier) */
+    /* update in program order (make things easier). Order is (op_num, unique_num): a runahead twin carries the op_num
+     * of the real uop it shadows, so op_nums alone can tie. */
     uns oldest_index = 0;
     Counter oldest_op_num = MAX_CTR;
+    Counter oldest_unique_num = MAX_CTR;
     // TODO: adjust this O(n2) algorithm by getting the program order outside first
     for (uns jj = 0; jj < dc->sd.max_op_count; jj++) {
-      if (dc->sd.ops[jj] && dc->sd.ops[jj]->op_num > last_oldest_op_num && dc->sd.ops[jj]->op_num < oldest_op_num) {
-        oldest_op_num = dc->sd.ops[jj]->op_num;
+      const Op* cand = dc->sd.ops[jj];
+      if (!cand)
+        continue;
+      Flag after_last = cand->op_num > last_oldest_op_num ||
+                        (cand->op_num == last_oldest_op_num && cand->unique_num > last_oldest_unique_num);
+      Flag before_best = cand->op_num < oldest_op_num ||
+                         (cand->op_num == oldest_op_num && cand->unique_num < oldest_unique_num);
+      if (after_last && before_best) {
+        oldest_op_num = cand->op_num;
+        oldest_unique_num = cand->unique_num;
         oldest_index = jj;
       }
     }
     last_oldest_op_num = oldest_op_num;
+    last_oldest_unique_num = oldest_unique_num;
 
     ASSERT(dc->proc_id, oldest_op_num < MAX_CTR);
     Op* op = dc->sd.ops[oldest_index];

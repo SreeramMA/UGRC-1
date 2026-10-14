@@ -2,81 +2,58 @@
 #define __RUNAHEAD_EXT_H__
 
 #include "globals/global_types.h"
-#include "libs/hash_lib.h"
 #include "op.h"
-#include "isa/isa.h"
 
-#define HBT_SIZE 64
-#define HBT_COUNTER_MAX 31
-#define HBT_DECREMENT_AMOUNT 15
-#define HBT_DECREMENT_PERIOD 1000
+/* Runahead model after "H2P-Brain: Hard-to-predict Branch Analysis Infrastructure" (ISPASS 2026), sec. V-C.
+ *
+ * Eligibility: a conditional branch is a Runahead candidate if more than RUNAHEAD_ELIGIBLE_PCT percent of its
+ * executions have a backward dependence slice ("backslice") of fewer than RUNAHEAD_BACKSLICE_LIMIT uops.
+ *
+ * Backslice (sec. III-B): scan the program-order uop stream backwards from the branch with an active register set
+ * (initially the branch's sources) and a store-index set. A uop that writes a register in the active set joins the
+ * slice, replaces that register by its own sources; a load forwarded from an earlier store joins the slice and
+ * hands over to that store (which joins the slice and contributes its sources). The scan stops at the previous
+ * instance of the same branch.
+ *
+ * Model: every instance of an eligible branch whose slice fits is predicted correctly, and a shadow twin of each
+ * slice uop is pushed through the pipeline just before the real uop, competing for ROB, RS, functional-unit, port,
+ * dcache and load-queue resources. Twins never retire architecturally and share the fate of their real uop.
+ *
+ * Requires the look-ahead buffer (--lookahead_buf_size): slices are computed on the future on-path stream, which
+ * is what lets a twin be pushed before its real uop. */
 
-// Hard Branch Table Entry
-typedef struct HBT_Entry_struct {
-  uns8 mispred_counter; // 5-bit saturating counter (0-31)
-} HBT_Entry;
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 void runahead_ext_init(void);
-void runahead_ext_update_hbt(Op* op);
 
-// --- Dependence Chain Cache (DCC) & Local Register File (LRF) ---
-#define DCC_SIZE 32
-#define MAX_CHAIN_LENGTH 16
-#define LRF_SIZE 8 // 8 physical registers per local register file (Table 2)
+// Called for every on-path uop as the look-ahead buffer builds the stream, in program order
+void runahead_ext_on_built_op(Op* op);
 
-typedef struct DCC_Uop_struct {
-  Addr pc;
-  Static_Inst_Info* inst;
-  Static_Op_Info uop;      // Private uop descriptor with remapped LRF registers
-  Mem_Type mem_type;
-  Addr mem_addr;           // Virtual address for load cache warm-up
-} DCC_Uop;
+// Statistics for the offline H2P-Brain analysis (runahead_branches.csv): the normal predictor's verdict on an on-path conditional branch (before any oracle
+// override), and the uops a recovery caused by `pc` flushed from the ROB
+void runahead_ext_note_prediction(Op* op, Flag normal_pred);
+void runahead_ext_note_flush(Addr pc, uns flush_uops);
 
-typedef struct DCC_Entry_struct {
-  Addr branch_pc;           // Tag: Terminating Branch PC
-  Flag branch_outcome;      // Tag: Terminating Branch Outcome (Taken/Not Taken)
-  Addr target_branch_pc;    // Target branch being predicted by this chain
-  Flag valid;               
-  uint64_t last_used;       // For LRU replacement
-  
-  uns chain_length;         
-  DCC_Uop uops[MAX_CHAIN_LENGTH];   // Full uop metadata and remapped private Static_Op_Info
-  Addr chain_pcs[MAX_CHAIN_LENGTH]; // Kept for logging/statistics
-  Flag live_ins[NUM_REGS];  // Required registers from the main pipeline
-} DCC_Entry;
+// The measured region starts: restart the statistics above (the eligibility statistics keep their history)
+void runahead_ext_reset_measured(void);
 
-void runahead_ext_dcc_init(void);
-void runahead_ext_dcc_insert(Addr branch_pc, Flag branch_outcome, Addr target_branch_pc, uns chain_length, Addr* chain_pcs, DCC_Uop* uops, Flag* live_ins);
-DCC_Entry* runahead_ext_dcc_lookup(Addr branch_pc, Flag branch_outcome);
+// Map stage: create and map the twins of `real` just before it, and queue them for the node stage
+void runahead_ext_map_twins(Op* real);
 
-// --- Chain Injection & Runahead Control ---
-extern Flag runahead_active;
-extern Addr runahead_target_pc;
+// Node stage: the oldest queued twin, if it belongs to `real` (twins enter the ROB right before their real uop)
+Op* runahead_ext_peek_twin(const Op* real);
+void runahead_ext_pop_twin(void);
 
-void runahead_ext_inject_chain(DCC_Entry* entry);
+// A recovery flushes the twins of the real uops it flushes (twins carry their real uop's op_num); this drops the
+// ones that have not reached the ROB yet
+void runahead_ext_on_recovery(Counter recovery_op_num);
 
-// --- Chain Extraction Buffer (CEB) ---
-#define CEB_SIZE 512
+void runahead_ext_dump(void);
 
-typedef struct CEB_Entry_struct {
-  Addr pc;
-  Static_Inst_Info* inst;
-  Static_Op_Info* uop;
-  Cf_Type cf_type;
-  Op_Type op_type;
-  Flag branch_dir;
-  
-  uns num_src_regs;
-  uns num_dest_regs;
-  uns16 srcs[MAX_SRCS]; 
-  uns16 dests[MAX_DESTS];
-  
-  Mem_Type mem_type;
-  Addr mem_addr;
-} CEB_Entry;
+#ifdef __cplusplus
+}
+#endif
 
-void runahead_ext_update_ceb(Op* op);
-void runahead_ext_extract_chain(Op* branch_op);
-void runahead_ext_dump_chain_lengths(void);
-
-#endif // __RUNAHEAD_EXT_H__
+#endif  // __RUNAHEAD_EXT_H__

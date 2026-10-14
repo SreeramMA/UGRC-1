@@ -50,6 +50,10 @@ void lsq_commit(Op* mem_op);            // free the entry when the mem op is ret
 
 int lsq_get_in_flight_load_num();
 
+// Runahead twins of loads take a load-queue slot (capacity only: they are not part of the in-order queue)
+Flag lsq_shadow_acquire(Op* twin);
+void lsq_shadow_release(Op* twin);
+
 #ifdef __cplusplus
 }
 #endif

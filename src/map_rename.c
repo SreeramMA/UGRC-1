@@ -1843,6 +1843,9 @@ Flag reg_file_available(uns stage_op_count) {
   --- allocate an entry and store the op info into the register entry
 */
 void reg_file_rename(Op *op) {
+  if (op && op->runahead_shadow)
+    return;
+
   ASSERT(map_data->proc_id,
          REG_RENAMING_SCHEME >= REG_RENAMING_SCHEME_INFINITE && REG_RENAMING_SCHEME < REG_RENAMING_SCHEME_NUM);
 
@@ -1865,6 +1868,9 @@ void reg_file_rename(Op *op) {
   --- do additional checking before execution
 */
 Flag reg_file_issue(Op *op) {
+  if (op && op->runahead_shadow)
+    return TRUE;
+
   ASSERT(map_data->proc_id,
          REG_RENAMING_SCHEME >= REG_RENAMING_SCHEME_INFINITE && REG_RENAMING_SCHEME < REG_RENAMING_SCHEME_NUM);
   return reg_renaming_scheme_func_table[REG_RENAMING_SCHEME].issue(op);
@@ -1877,6 +1883,9 @@ Flag reg_file_issue(Op *op) {
   --- consume the src registers
 */
 void reg_file_consume(Op *op) {
+  if (op && op->runahead_shadow)
+    return;
+
   ASSERT(map_data->proc_id,
          REG_RENAMING_SCHEME >= REG_RENAMING_SCHEME_INFINITE && REG_RENAMING_SCHEME < REG_RENAMING_SCHEME_NUM);
   reg_renaming_scheme_func_table[REG_RENAMING_SCHEME].consume(op);
@@ -1889,6 +1898,9 @@ void reg_file_consume(Op *op) {
   --- write back the dst registers
 */
 void reg_file_produce(Op *op) {
+  if (op && op->runahead_shadow)
+    return;
+
   ASSERT(map_data->proc_id,
          REG_RENAMING_SCHEME >= REG_RENAMING_SCHEME_INFINITE && REG_RENAMING_SCHEME < REG_RENAMING_SCHEME_NUM);
   reg_renaming_scheme_func_table[REG_RENAMING_SCHEME].produce(op);
@@ -1913,6 +1925,9 @@ void reg_file_recover(Op *op) {
   --- update the register metadata when an op is non-spec
 */
 void reg_file_precommit(Op *op) {
+  if (op && op->runahead_shadow)
+    return;
+
   ASSERT(map_data->proc_id,
          REG_RENAMING_SCHEME >= REG_RENAMING_SCHEME_INFINITE && REG_RENAMING_SCHEME < REG_RENAMING_SCHEME_NUM);
   reg_renaming_scheme_func_table[REG_RENAMING_SCHEME].precommit(op);
@@ -1925,6 +1940,9 @@ void reg_file_precommit(Op *op) {
   --- release the previous register with same architectural id
 */
 void reg_file_commit(Op *op) {
+  if (op && op->runahead_shadow)
+    return;
+
   ASSERT(map_data->proc_id,
          REG_RENAMING_SCHEME >= REG_RENAMING_SCHEME_INFINITE && REG_RENAMING_SCHEME < REG_RENAMING_SCHEME_NUM);
   reg_renaming_scheme_func_table[REG_RENAMING_SCHEME].commit(op);

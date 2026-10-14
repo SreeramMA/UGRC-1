@@ -48,6 +48,7 @@
 #include "debug/pipeview.h"
 
 #include "bp/bp.param.h"
+#include "bp/runahead_ext.h"
 #include "core.param.h"
 #include "general.param.h"
 #include "prefetcher/pref.param.h"
@@ -218,6 +219,7 @@ static inline void check_heartbeat(uns8 proc_id, Flag final) {
       warmup_dump_done[i] = TRUE;
     }
     reset_h2p_stats();
+    runahead_ext_reset_measured();
     period_last_cycle_count = cycle_count;
   }
 

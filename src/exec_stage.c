@@ -47,7 +47,6 @@
 #include "memory/memory.param.h"
 
 #include "bp/bp.h"
-#include "bp/runahead_ext.h"
 #include "dvfs/perf_pred.h"
 
 #include "cmp_model.h"
@@ -114,48 +113,8 @@ static inline void init_op_type_delays() {
 
 /**************************************************************************************/
 /* init_exec_stage: */
-#include "libs/hash_lib.h"
-#include <stdlib.h>
-
-typedef struct {
-    Addr pc;
-    uns64 num_taken;
-    uns64 num_untaken;
-    uns64 num_mispred;
-} Branch_Stat;
-
-Hash_Table g_branch_stats[MAX_NUM_PROCS];
-Flag g_branch_stats_init[MAX_NUM_PROCS] = {0};
-
-static void print_branch_stats_callback(void* data_ptr, void* arg) {
-    Branch_Stat* stat = (Branch_Stat*)data_ptr;
-    FILE* out = (FILE*)arg;
-    fprintf(out, "0x%llx,%llu,%llu,%llu\n", (unsigned long long)stat->pc, stat->num_taken, stat->num_untaken, stat->num_mispred);
-}
-
-static void print_and_cleanup_branch_stats(void) {
-    for (int i = 0; i < MAX_NUM_PROCS; i++) {
-        if (g_branch_stats_init[i]) {
-            char filename[256];
-            sprintf(filename, "branch_dump_%d.txt", i);
-            FILE* out = fopen(filename, "w");
-            if (out) {
-                fprintf(out, "PC,Taken,Untaken,Mispredicted\n");
-                hash_table_scan(&g_branch_stats[i], print_branch_stats_callback, out);
-                fclose(out);
-            }
-        }
-    }
-}
 
 void init_exec_stage(uns8 proc_id, const char* name) {
-  if (!g_branch_stats_init[proc_id]) {
-    init_hash_table(&g_branch_stats[proc_id], "branch_stats", 1000003, sizeof(Branch_Stat));
-    g_branch_stats_init[proc_id] = 1;
-    if (proc_id == 0) {
-      atexit(print_and_cleanup_branch_stats);
-    }
-  }
   ASSERT(proc_id, exec);
   DEBUG(proc_id, "Initializing %s stage\n", name);
 
@@ -201,7 +160,7 @@ void recover_exec_stage() {
     }
     if (op && FLUSH_OP(op)) {
       DEBUG(exec->proc_id, "Exec flushing op_num:%llu off_path:%u\n", (unsigned long long)op->op_num, op->off_path);
-      ASSERT(exec->proc_id, op->off_path);
+      ASSERT(exec->proc_id, op->off_path || op->runahead_shadow);
       exec->sd.ops[ii] = NULL;
       exec->sd.op_count--;
       fu->avail_cycle = cycle_count + 1;
@@ -591,29 +550,6 @@ static inline void exec_stage_process_op(Op* op) {
 }
 
 static inline void exec_stage_bp_resolve(Op* op) {
-  if (op->uop->cf_type) {
-    if (g_branch_stats_init[op->proc_id]) {
-      Addr pc = op->inst ? op->inst->addr : 0;
-      Flag new_entry;
-      Branch_Stat* stat = (Branch_Stat*)hash_table_access_create(&g_branch_stats[op->proc_id], pc, &new_entry);
-      if (new_entry) {
-        stat->pc = pc;
-        stat->num_taken = 0;
-        stat->num_untaken = 0;
-        stat->num_mispred = 0;
-      }
-      if (op->oracle_info.dir) {
-        stat->num_taken++;
-      } else {
-        stat->num_untaken++;
-      }
-      Flag mispred = (op->bp_pred_info->recovery_point == RECOVER_AT_EXEC);
-      if (mispred) {
-        stat->num_mispred++;
-      }
-    }
-  }
-
   if (!BP_UPDATE_AT_RETIRE) {
     // this code updates the branch prediction structures
     if (op->uop->cf_type >= CF_IBR)
@@ -622,26 +558,20 @@ static inline void exec_stage_bp_resolve(Op* op) {
     bp_resolve_op(g_bp_data, op);
   }
 
+  if (op->runahead_oracle && !op->off_path) {
+    // accounting of the runahead candidates: how many resolve at exec, and how many of those still mispredict
+    STAT_EVENT(op->proc_id, RUNAHEAD_ORACLE_BRANCH_EXEC);
+    if (op->bp_pred_info->recovery_point == RECOVER_AT_EXEC)
+      STAT_EVENT(op->proc_id, RUNAHEAD_ORACLE_BRANCH_MISPRED);
+  }
+
   if (op->bp_pred_info->recovery_point == RECOVER_AT_EXEC) {
     DEBUG(exec->proc_id, "Exec schedules recovery for op_num:%llu at cycle:%llu\n", (unsigned long long)op->op_num,
           (unsigned long long)op_get_exec_cycle(op));
     bp_stat_main_branch_resolve_latency(op, op_get_exec_cycle(op), TRUE);
     bp_sched_recovery(bp_recovery_info, op, op_get_exec_cycle(op));
-    if (!op->off_path) {
+    if (!op->off_path)
       op->recovery_scheduled = TRUE;
-
-      // Check if this mispredicting branch triggers a runahead chain in the DCC
-      DCC_Entry* entry = runahead_ext_dcc_lookup(op->inst->addr, op->oracle_info.dir);
-      if (entry) {
-        runahead_active = TRUE;
-        runahead_target_pc = entry->target_branch_pc;
-        runahead_ext_inject_chain(entry);
-        printf("\n[RUNAHEAD] Recovery Hit in DCC! Activated Runahead for Target Branch PC: 0x%llx\n",
-               (unsigned long long)runahead_target_pc);
-      } else {
-        runahead_active = FALSE;
-      }
-    }
 
     // stats for the reason of resteer
     STAT_EVENT(op->proc_id, RESTEER_RECOVER_AT_EXEC_NOT_CF + op->uop->cf_type);
@@ -658,5 +588,3 @@ static inline void exec_stage_bp_resolve(Op* op) {
   }
 #endif
 }
-
-

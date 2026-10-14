@@ -1,4 +1,3 @@
-#include "bp/runahead_ext.h"
 /* Copyright 2020 HPS/SAFARI Research Groups
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -48,6 +47,7 @@
 #include "memory/memory.param.h"
 
 #include "bp/bp.h"
+#include "bp/runahead_ext.h"
 #include "bp/tagescl.h"
 #include "frontend/frontend.h"
 #include "memory/memory.h"
@@ -189,7 +189,7 @@ void flush_scheduling_buffer() {
       DEBUG(node->proc_id, "Node sched-buffer flushing op_num:%llu off_path:%u\n", (unsigned long long)op->op_num,
             op->off_path);
       ASSERT(node->proc_id, node->proc_id == op->proc_id);
-      ASSERT(node->proc_id, op->off_path);
+      ASSERT(node->proc_id, op->off_path || op->runahead_shadow);
       ASSERTM(node->proc_id, op->op_num > bp_recovery_info->recovery_op_num, "op_num:%s\n", unsstr64(op->op_num));
 
       node->sd.ops[ii] = NULL;
@@ -202,6 +202,11 @@ void flush_scheduling_buffer() {
 
 void flush_rs() {
   Op* op = node->next_op_into_rs;
+  // Shadow ops are interleaved with real ops in the ROB and are all flushed. One waiting for the RS must not
+  // hide the surviving real ops behind it, so resume from the first op that is not a doomed shadow op.
+  while (op && op->runahead_shadow && FLUSH_OP(op))
+    op = op->next_node;
+  node->next_op_into_rs = op;
   if (op && FLUSH_OP(op)) {
     DEBUG(node->proc_id, "Node RS-input flushing op_num:%llu off_path:%u\n", (unsigned long long)op->op_num,
           op->off_path);
@@ -216,6 +221,7 @@ void flush_window() {
   Op* op;
   Op** last;
   uns flush_ops = 0;
+  uns flush_shadow_ops = 0;
   uns keep_ops = 0;
 
   node->node_tail = NULL;
@@ -225,15 +231,22 @@ void flush_window() {
     if (FLUSH_OP(op)) {
       DEBUG(node->proc_id, "Node window flushing op_num:%llu off_path:%u\n", (unsigned long long)op->op_num,
             op->off_path);
-      ASSERT(node->proc_id, op->off_path);
-      if (!op->macro_fused)
-        flush_ops++;
-      ASSERT(node->proc_id, op->off_path);
+      ASSERT(node->proc_id, op->off_path || op->runahead_shadow);
+      if (op->runahead_shadow) {
+        // not part of the flushed-work statistics; they never held a real instruction
+        flush_shadow_ops++;
+        STAT_EVENT(node->proc_id, RUNAHEAD_SHADOW_OPS_FLUSHED);
+      } else {
+        if (!op->macro_fused)
+          flush_ops++;
+      }
       ASSERT(node->proc_id, op->op_num > bp_recovery_info->recovery_op_num);
       op->in_node_list = FALSE;
       *last = op->next_node;
       if (op->parent_FT)
         ft_free_op(op);
+      else if (op->runahead_shadow)
+        free_op(op);
     } else {
       /* Keep op */
 
@@ -250,9 +263,17 @@ void flush_window() {
     }
   }
 
-  ASSERT(node->proc_id, flush_ops + keep_ops == node->node_count);
+  ASSERT(node->proc_id, flush_ops + flush_shadow_ops + keep_ops == node->node_count);
   node->node_count = keep_ops;
   ASSERT(node->proc_id, node->node_count <= NODE_TABLE_SIZE);
+
+  // Statistics of the offline H2P-Brain analysis: only the main predictor's execute-time recoveries of on-path
+  // branches (not the L0 predictor's early recoveries)
+  Op* recovery_op = bp_recovery_info->recovery_op;
+  if (recovery_op && recovery_op->inst && recovery_op->uop->cf_type && !recovery_op->off_path &&
+      recovery_op->bp_pred_info == &recovery_op->bp_pred_main &&
+      recovery_op->bp_pred_info->recovery_point == RECOVER_AT_EXEC)
+    runahead_ext_note_flush(recovery_op->inst->addr, flush_ops);
 }
 
 /**************************************************************************************/
@@ -339,6 +360,29 @@ void update_node_stage(Stage_Data* src_sd) {
 /* node_fill_rob: This function takes ops from the map stage and allocates them into the node table.
  *    Note, this function does not place the Op in the RS, that is done later.*/
 
+/* Runahead: a twin enters the ROB (and the RS queue) exactly like any other op, but is not part of the real stream */
+static void node_insert_twin(Op* twin) {
+  twin->node_id = node->node_count;
+  op_set_issue_cycle(twin, cycle_count);
+
+  ASSERT(node->proc_id, !twin->in_node_list);
+  if (node->node_tail)
+    node->node_tail->next_node = twin;
+  if (node->node_head == NULL)
+    node->node_head = twin;
+  twin->next_node = NULL;
+  twin->in_node_list = TRUE;
+  node->node_tail = twin;
+
+  if (!node->next_op_into_rs)
+    node->next_op_into_rs = twin;
+
+  node->node_count++;
+  ASSERT(node->proc_id, node->node_count <= NODE_TABLE_SIZE);
+  twin->state = OS_IN_ROB;
+  STAT_EVENT(twin->proc_id, RUNAHEAD_SHADOW_OPS_INSERTED);
+}
+
 void node_fill_rob(Stage_Data* src_sd) {
   Flag on_path = FALSE;
   uns ii;
@@ -365,7 +409,32 @@ void node_fill_rob(Stage_Data* src_sd) {
     if (!op)
       continue;
 
-    if (op->uop->mem_type == MEM_LD || op->uop->mem_type == MEM_ST) {
+    // Runahead twins of this uop enter the ROB right before it, competing for ROB and load-queue entries
+    if (op->runahead_twins) {
+      Op* twin;
+      while ((twin = runahead_ext_peek_twin(op)) != NULL) {
+        if (is_node_table_full()) {
+          collect_node_table_full_stats(node->node_head);
+          rob_block_issue_reason = ROB_BLOCK_ISSUE_FULL;
+          return;
+        }
+        if (twin->uop->mem_type == MEM_LD && !lsq_shadow_acquire(twin)) {
+          STAT_EVENT(op->proc_id, LSQ_FULL_TOTAL);
+          STAT_EVENT(op->proc_id, LSQ_FULL_TOTAL + MEM_LD);
+          return;
+        }
+        runahead_ext_pop_twin();
+        node_insert_twin(twin);
+      }
+      if (is_node_table_full()) {
+        collect_node_table_full_stats(node->node_head);
+        rob_block_issue_reason = ROB_BLOCK_ISSUE_FULL;
+        return;
+      }
+    }
+
+    // shadow (runahead) ops do not occupy the LSQ
+    if (!op->runahead_shadow && (op->uop->mem_type == MEM_LD || op->uop->mem_type == MEM_ST)) {
       if (!lsq_available(op->uop->mem_type)) {
         DEBUG(node->proc_id, "Node fill stalled: LSQ full for op_num:%s mem_type:%s src_sd_op_count:%d node_count:%d\n",
               unsstr64(op->op_num), op->uop->mem_type == MEM_LD ? "LD" : "ST", src_sd->op_count, node->node_count);
@@ -404,8 +473,9 @@ void node_fill_rob(Stage_Data* src_sd) {
     if (!node->next_op_into_rs)   /* if there are no ops waiting to enter RS */
       node->next_op_into_rs = op; /* this will be the first one */
 
-    // Jump uop after CMP or TEST will be fused into one uop
-    node_fuse_op(op);
+    // Jump uop after CMP or TEST will be fused into one uop (shadow ops sit outside the real op stream)
+    if (!op->runahead_shadow)
+      node_fuse_op(op);
     if (!op->macro_fused)
       node->node_count++;
 
@@ -457,6 +527,21 @@ void node_retire() {
     }
 
     rob_stall_reason = ROB_STALL_NONE;
+
+    if (op->runahead_shadow) {
+      // A finished shadow op only frees its ROB slot: no instruction/uop counts, register commit, LSQ or hooks.
+      ret_count++;
+      STAT_EVENT(op->proc_id, RUNAHEAD_SHADOW_OPS_RETIRED);
+      if (op->uop->mem_type == MEM_LD)
+        STAT_EVENT(op->proc_id, RUNAHEAD_SHADOW_LOADS_RETIRED);
+      Op* next_shadow_retired = op->next_node;
+      op->in_node_list = FALSE;
+      node->node_count--;  // shadow ops are never macro-fused
+      ASSERT(node->proc_id, node->node_count >= 0);
+      free_op(op);
+      op = next_shadow_retired;
+      continue;
+    }
 
     /**op is ready to retire**/
     ASSERTM(node->proc_id, op->state != OS_TENTATIVE, "op_num: %llu\n", op->op_num);
@@ -561,9 +646,6 @@ void node_retire() {
 
     Op* next_retired = op->next_node;
     Flag macro_fused_saved = op->macro_fused;
-
-    runahead_ext_update_hbt(op);
-    runahead_ext_update_ceb(op);
 
     if (model->op_retired_hook)
       model->op_retired_hook(op);
@@ -713,6 +795,10 @@ void node_precommit_update(void) {
   // scan the node table to update the precommit pointer
   uns precommit_count = 0;
   for (; op != NULL && precommit_count < NODE_RET_WIDTH; op = op->next_node) {
+    // shadow ops never retire architecturally, so they are never precommitted
+    if (op->runahead_shadow)
+      continue;
+
     // wait until the results usable for branches
     if (op->uop->cf_type && op_get_exec_cycle(op) > cycle_count)
       return;

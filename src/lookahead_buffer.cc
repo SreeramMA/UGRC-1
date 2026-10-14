@@ -21,6 +21,7 @@
 #include "isa/isa_macros.h"
 
 #include "decoupled_frontend.h"
+#include "bp/runahead_ext.h"
 #include "ft.h"
 #include "ft_info.h"
 #include "op.h"
@@ -113,6 +114,8 @@ void LookaheadBuffer::insert_ft() {
                                          false, false, []() { return decoupled_fe_get_next_on_path_op_num(); });
   ASSERT(proc_id, build_success != FT_EVENT_BUILD_FAIL);
   new_ft->set_prebuilt(true);
+  for (Op* op : new_ft->get_ops())
+    runahead_ext_on_built_op(op);
   lookahead_buffer[wrptr_lb] = new_ft;
   update_search_indexes_on_insert(wrptr_lb);
   wrptr_lb = (wrptr_lb + 1) % LOOKAHEAD_BUF_SIZE;

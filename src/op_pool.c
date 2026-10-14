@@ -53,6 +53,7 @@ allocates them once and then hands out pointers every time 'alloc_op' is called.
 #include "frontend/pin_trace_fe.h"
 
 #include "dyn_inst.h"
+#include "lsq.h"
 #include "map.h"
 #include "model.h"
 #include "op_info.h"
@@ -204,6 +205,17 @@ void free_op(Op* op) {
 
   if (op->inst && op->uop->mem_type == MEM_ST)
     delete_store_hash_entry(op);
+
+  if (op->runahead_lsq_held) {
+    lsq_shadow_release(op);
+    op->runahead_lsq_held = FALSE;
+  }
+
+  if (op->runahead_shadow) {
+    // shadow ops own a private copy of their Static_Op_Info
+    free(op->uop);
+    op->uop = NULL;
+  }
 
   if (op->inst && op->inst->fake_inst) {
     // fake ops get their own Static_Inst_Info; their Static_Op_Info is shared, so it is not freed
